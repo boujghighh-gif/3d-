@@ -3,180 +3,249 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Hand Controlled Sun</title>
+    <title>Hand of the Sun God</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; }
-        canvas { display: block; position: absolute; top: 0; left: 0; z-index: 1; transform: scaleX(-1); }
-        video { position: absolute; top: 0; left: 0; z-index: 0; opacity: 0; pointer-events: none; transform: scaleX(-1); }
-        #loading {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            color: white; font-family: sans-serif; z-index: 10; font-size: 20px; text-align: center;
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        #video-feed { position: absolute; top: 0; left: 0; visibility: hidden; } /* Processed but hidden */
+        #ui {
+            position: absolute; bottom: 20px; left: 0; width: 100%;
+            text-align: center; color: white; font-family: sans-serif;
+            pointer-events: none; z-index: 10; text-shadow: 0 0 10px #ffaa00;
         }
     </style>
-    <!-- Import Three.js and MediaPipe -->
-    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
-    <div id="loading">Initializing Magic...<br><small>Please allow camera access</small></div>
-    <video id="input_video" playsinline></video>
+    <div id="ui">
+        <h3>Show Palm to Summon • Close Fist to Explode</h3>
+    </div>
+    <div id="canvas-container"></div>
+    <video id="video-feed" playsinline></video>
+
+    <!-- Import Three.js and MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+    <!-- Post Processing for the GLOW effect -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/postprocessing/EffectComposer.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/postprocessing/RenderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/postprocessing/ShaderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/shaders/CopyShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+    
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 
     <script>
         // --- CONFIGURATION ---
-        const VIDEO_WIDTH = 1280;
-        const VIDEO_HEIGHT = 720;
-        
-        // --- 1. THREE.JS SETUP (The 3D World) ---
+        const PARTICLE_COUNT = 300; // For explosion
+        const SUN_COLOR = 0xffaa00;
+        const CORE_COLOR = 0xffffff;
+        const EXPLOSION_COLORS = [0xff0000, 0xffaa00, 0xffff00];
+
+        // --- THREE.JS SETUP ---
+        const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         
-        // Camera setup to match 2D screen roughly
+        // Camera setup
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.z = 20;
+        camera.position.z = 5;
 
-        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
 
-        // Lighting
-        const ambientLight = new THREE.AmbientLight(0x404040);
-        scene.add(ambientLight);
+        // --- POST PROCESSING (BLOOM) ---
+        // This makes the sun look like it's actually glowing light
+        const renderScene = new THREE.RenderPass(scene, camera);
+        const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0;
+        bloomPass.strength = 2.5; // Intensity of glow
+        bloomPass.radius = 0.5;
 
-        // --- 2. CREATE THE SUN OBJECT ---
-        const sunGeometry = new THREE.SphereGeometry(2, 32, 32);
-        const sunMaterial = new THREE.MeshBasicMaterial({ 
-            color: 0xffaa00, 
-            transparent: true, 
-            opacity: 0.9 
-        });
-        const sunMesh = new THREE.Mesh(sunGeometry, sunMaterial);
+        const composer = new THREE.EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- OBJECTS ---
         
-        // Add a glow effect (larger sphere behind)
-        const glowGeometry = new THREE.SphereGeometry(3.5, 32, 32);
-        const glowMaterial = new THREE.MeshBasicMaterial({ 
-            color: 0xff4400, 
-            transparent: true, 
-            opacity: 0.3,
-            side: THREE.BackSide
-        });
-        const glowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
-        sunMesh.add(glowMesh); // Attach glow to sun
+        // 1. The Sun (Group containing Core + Corona)
+        const sunGroup = new THREE.Group();
+        scene.add(sunGroup);
+        sunGroup.visible = false;
+
+        // Core
+        const coreGeo = new THREE.SphereGeometry(0.5, 32, 32);
+        const coreMat = new THREE.MeshBasicMaterial({ color: CORE_COLOR });
+        const sunCore = new THREE.Mesh(coreGeo, coreMat);
+        sunGroup.add(sunCore);
+
+        // Corona (Spiky/Noise sphere)
+        const coronaGeo = new THREE.IcosahedronGeometry(0.6, 2);
+        const coronaMat = new THREE.MeshBasicMaterial({ color: SUN_COLOR, wireframe: true, transparent: true, opacity: 0.5 });
+        const sunCorona = new THREE.Mesh(coronaGeo, coronaMat);
+        sunGroup.add(sunCorona);
         
-        // Light emitting from sun
-        const sunLight = new THREE.PointLight(0xffaa00, 2, 50);
-        sunMesh.add(sunLight);
+        // Outer Glow Particles
+        const glowGeo = new THREE.BufferGeometry();
+        const glowCount = 50;
+        const glowPos = new Float32Array(glowCount * 3);
+        for(let i=0; i<glowCount*3; i++) glowPos[i] = (Math.random() - 0.5) * 3;
+        glowGeo.setAttribute('position', new THREE.BufferAttribute(glowPos, 3));
+        const glowMat = new THREE.PointsMaterial({ color: SUN_COLOR, size: 0.1, transparent: true, opacity: 0.6 });
+        const sunParticles = new THREE.Points(glowGeo, glowMat);
+        sunGroup.add(sunParticles);
 
-        scene.add(sunMesh);
-        sunMesh.visible = false; // Hidden by default
 
-        // --- 3. PARTICLE SYSTEM (Explosion) ---
-        const particleCount = 200;
-        const particlesGeometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(particleCount * 3);
-        const velocities = []; 
+        // 2. Explosion System
+        const explosionParts = [];
+        const explosionGeo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
 
-        for(let i=0; i<particleCount; i++) {
-            positions[i*3] = 0; positions[i*3+1] = 0; positions[i*3+2] = 0;
-            velocities.push(new THREE.Vector3());
-        }
-
-        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const particlesMaterial = new THREE.PointsMaterial({
-            color: 0xffaa00,
-            size: 0.8,
-            transparent: true,
-            opacity: 0
-        });
-        const particleSystem = new THREE.Points(particlesGeometry, particlesMaterial);
-        scene.add(particleSystem);
-
-        let explosionActive = false;
-
-        function triggerExplosion(pos) {
-            explosionActive = true;
-            particlesMaterial.opacity = 1;
-            
-            const positions = particleSystem.geometry.attributes.position.array;
-            
-            for (let i = 0; i < particleCount; i++) {
-                // Reset positions to sun center
-                positions[i*3] = pos.x;
-                positions[i*3+1] = pos.y;
-                positions[i*3+2] = pos.z;
-
-                // Random explosion velocity
-                velocities[i].set(
-                    (Math.random() - 0.5) * 2,
-                    (Math.random() - 0.5) * 2,
-                    (Math.random() - 0.5) * 2
-                );
+        function triggerExplosion(position) {
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const material = new THREE.MeshBasicMaterial({ 
+                    color: EXPLOSION_COLORS[Math.floor(Math.random() * EXPLOSION_COLORS.length)] 
+                });
+                const particle = new THREE.Mesh(explosionGeo, material);
+                
+                particle.position.copy(position);
+                
+                // Random velocity outward
+                particle.userData = {
+                    velocity: new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.5,
+                        (Math.random() - 0.5) * 0.5,
+                        (Math.random() - 0.5) * 0.5
+                    ),
+                    life: 1.0, // fading out
+                    decay: 0.01 + Math.random() * 0.03
+                };
+                
+                scene.add(particle);
+                explosionParts.push(particle);
             }
-            particleSystem.geometry.attributes.position.needsUpdate = true;
         }
 
-        // --- 4. MEDIAPIPE HANDS LOGIC ---
-        const videoElement = document.getElementById('input_video');
-        let isHandClosed = false;
-        let isHandDetected = false;
+        // --- LOGIC ---
+        let isHandOpen = false;
+        let isHandPresent = false;
+        let sunScale = 0;
+        let handPosition = new THREE.Vector3();
+
+        function checkGesture(landmarks) {
+            // Simple logic: Is the distance between wrist (0) and middle finger tip (12) large?
+            // And are fingers grouped together?
+            
+            const wrist = landmarks[0];
+            const middleTip = landmarks[12];
+            const thumbTip = landmarks[4];
+            const pinkyTip = landmarks[20];
+
+            // Calculate distance roughly in screen space
+            const len = Math.sqrt(Math.pow(middleTip.x - wrist.x, 2) + Math.pow(middleTip.y - wrist.y, 2));
+            const width = Math.sqrt(Math.pow(pinkyTip.x - thumbTip.x, 2) + Math.pow(pinkyTip.y - thumbTip.y, 2));
+
+            // Heuristic values
+            if (len < 0.25) return "FIST"; // Fingers curled
+            if (len > 0.3) return "OPEN";  // Fingers extended
+            return "UNKNOWN";
+        }
+
+        function update3DPosition(landmarks) {
+            // Map 2D hand coordinates (0-1) to 3D world coordinates
+            // MediaPipe x is 0(left) to 1(right). Three.js 0 is center.
+            // Z needs to be fixed or estimated.
+            
+            // Wrist as anchor
+            const x = (1 - landmarks[9].x) * 2 - 1; // Flip X because webcam is mirrored
+            const y = -(landmarks[9].y * 2 - 1);
+            
+            // Project onto a plane at z=0
+            const vector = new THREE.Vector3(x * 4, y * 3, 0); // Multipliers adjust sensitivity
+            
+            // Lerp for smoothness
+            handPosition.lerp(vector, 0.1);
+        }
+
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = Date.now() * 0.001;
+
+            // 1. Sun Animation
+            if (isHandPresent && isHandOpen) {
+                sunGroup.visible = true;
+                sunGroup.position.copy(handPosition);
+                
+                // Rotate and pulse
+                sunCorona.rotation.x = time;
+                sunCorona.rotation.y = time * 0.5;
+                sunParticles.rotation.y = -time * 0.2;
+                
+                // Birth animation (Grow)
+                if (sunScale < 1) sunScale += 0.05;
+                sunGroup.scale.set(sunScale, sunScale, sunScale);
+
+                // Pulse core
+                sunCore.scale.setScalar(1 + Math.sin(time * 5) * 0.1);
+
+            } else if (sunGroup.visible && !isHandOpen) {
+                // If it was visible, but hand closed -> Explode and hide
+                triggerExplosion(sunGroup.position);
+                sunGroup.visible = false;
+                sunScale = 0;
+            }
+
+            // 2. Explosion Physics
+            for (let i = explosionParts.length - 1; i >= 0; i--) {
+                const p = explosionParts[i];
+                p.position.add(p.userData.velocity);
+                p.userData.life -= p.userData.decay;
+                p.scale.setScalar(p.userData.life);
+                
+                // Simple Gravity
+                p.userData.velocity.y -= 0.005;
+
+                if (p.userData.life <= 0) {
+                    scene.remove(p);
+                    explosionParts.splice(i, 1);
+                }
+            }
+
+            // 3. Render
+            composer.render();
+        }
+        animate();
+
+
+        // --- MEDIAPIPE SETUP ---
+        const videoElement = document.getElementById('video-feed');
 
         function onResults(results) {
-            document.getElementById('loading').style.display = 'none';
-
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                isHandDetected = true;
+                isHandPresent = true;
                 const landmarks = results.multiHandLandmarks[0];
-
-                // 1. Calculate Palm Center (Average of wrist and middle finger base)
-                const wrist = landmarks[0];
-                const middleFingerBase = landmarks[9];
                 
-                // Convert normalized coordinates (0-1) to Three.js World Coordinates
-                // Note: We create a projection mapping based on camera Z depth
-                const x = (0.5 - wrist.x) * 30; // 30 is a scaling factor based on FOV
-                const y = (0.5 - wrist.y) * 20; // Invert Y
-                const z = 0; 
-
-                // 2. Detect Gesture (Open vs Closed)
-                // We check the distance between the Wrist (0) and the Middle Finger Tip (12)
-                const tipY = landmarks[12].y;
-                const wristY = landmarks[0].y;
-                const distance = Math.sqrt(
-                    Math.pow(landmarks[12].x - landmarks[0].x, 2) + 
-                    Math.pow(landmarks[12].y - landmarks[0].y, 2)
-                );
-
-                // Thresholds usually need tuning. 
-                // < 0.25 usually means fingers are curled in (Fist)
-                // > 0.35 usually means fingers are extended (Palm)
-                const wasClosed = isHandClosed;
-                isHandClosed = distance < 0.25;
-
-                // LOGIC STATE MACHINE
-                if (!isHandClosed) {
-                    // HAND OPEN: Show Sun
-                    sunMesh.visible = true;
-                    // Interpolate position for smoothness
-                    sunMesh.position.x += (x - sunMesh.position.x) * 0.2;
-                    sunMesh.position.y += (y - sunMesh.position.y) * 0.2;
-                    sunMesh.position.z = z;
-                    
-                    // Pulse effect
-                    const time = Date.now() * 0.005;
-                    const scale = 1 + Math.sin(time) * 0.1;
-                    sunMesh.scale.set(scale, scale, scale);
-
-                } else if (isHandClosed && !wasClosed && sunMesh.visible) {
-                    // JUST CLOSED FIST: Explode!
-                    sunMesh.visible = false;
-                    triggerExplosion(sunMesh.position);
+                update3DPosition(landmarks);
+                
+                const gesture = checkGesture(landmarks);
+                if (gesture === "OPEN") {
+                    isHandOpen = true;
+                } else if (gesture === "FIST") {
+                    isHandOpen = false; // Triggers explosion in animate loop
                 }
-
             } else {
-                isHandDetected = false;
-                // Optionally hide sun if hand leaves frame, but let's keep it until explosion
-                if(!explosionActive) sunMesh.visible = false;
+                isHandPresent = false;
+                if (sunGroup.visible) {
+                    // Hand lost? Shrink away
+                    sunScale -= 0.1;
+                    if(sunScale <= 0) sunGroup.visible = false;
+                    sunGroup.scale.setScalar(sunScale);
+                }
             }
         }
 
@@ -193,61 +262,24 @@
 
         hands.onResults(onResults);
 
-        const cameraUtils = new Camera(videoElement, {
+        const cameraFeed = new Camera(videoElement, {
             onFrame: async () => {
                 await hands.send({image: videoElement});
             },
-            width: VIDEO_WIDTH,
-            height: VIDEO_HEIGHT
+            width: 1280,
+            height: 720,
+            facingMode: "user" // Use front camera
         });
-        cameraUtils.start();
 
-        // --- 5. ANIMATION LOOP ---
-        function animate() {
-            requestAnimationFrame(animate);
+        cameraFeed.start();
 
-            // Animate Explosion
-            if (explosionActive) {
-                const positions = particleSystem.geometry.attributes.position.array;
-                let activeParticles = false;
-
-                for (let i = 0; i < particleCount; i++) {
-                    positions[i*3] += velocities[i].x;
-                    positions[i*3+1] += velocities[i].y;
-                    positions[i*3+2] += velocities[i].z;
-
-                    // Apply drag/gravity
-                    velocities[i].multiplyScalar(0.95); // Drag
-
-                    // Check if particles are still moving meaningfully
-                    if (Math.abs(velocities[i].x) > 0.01) activeParticles = true;
-                }
-                
-                particleSystem.geometry.attributes.position.needsUpdate = true;
-                
-                // Fade out
-                particlesMaterial.opacity -= 0.02;
-                if (particlesMaterial.opacity <= 0) {
-                    explosionActive = false;
-                    particlesMaterial.opacity = 0;
-                }
-            }
-
-            // Rotate Sun Glow
-            glowMesh.rotation.z += 0.01;
-            glowMesh.rotation.x += 0.01;
-
-            renderer.render(scene, camera);
-        }
-        
         // Handle Resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
         });
-
-        animate();
 
     </script>
 </body>
